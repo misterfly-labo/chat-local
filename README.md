@@ -6,6 +6,13 @@ Interface graphique en Rust (eframe/egui) pour discuter — au clavier **et à l
 
 ![Capture d'écran de chat-local](screenshot.png)
 
+## Téléchargement
+
+Vous pouvez télécharger les binaires pré-compilés pour Linux et Windows sur la page des **[Releases](https://github.com/misterfly-labo/chat-local/releases/latest)** :
+
+*   **Arch Linux** : Paquet `.pkg.tar.zst` (installation via `sudo pacman -U ...`)
+*   **Windows 11** : Archive `.zip` contenant l'exécutable natif
+
 ## Fonctionnalités
 
 - **Chat complet** : historique conservé et renvoyé au modèle à chaque message, bulles de messages avec retour à la ligne automatique
