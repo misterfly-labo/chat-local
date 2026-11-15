@@ -148,6 +148,8 @@ struct PersistedState {
     font_scale: Option<f32>,
     /// Lire les réponses du modèle à voix haute.
     voice_output: Option<bool>,
+    /// Secondes de silence avant envoi automatique de la requête vocale.
+    auto_send_silence: Option<u32>,
 }
 
 /// Répare l'en-tête WAV si le process d'enregistrement a été tué avant
@@ -256,6 +258,10 @@ struct ChatApp {
     voice_output_enabled: bool,
     /// Le modèle est en train de parler.
     speaking: bool,
+    /// Réglage : secondes de silence avant l'envoi automatique.
+    silence_limit_s: u32,
+    /// Valeur partagée (ms) lue par le thread de surveillance du micro.
+    silence_limit_ms: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
 /// Lit la mémoire résidente (VmRSS) du process qui pilote le NPU.
@@ -285,6 +291,11 @@ impl ChatApp {
             .and_then(|s| serde_json::from_str::<PersistedState>(&s).ok())
             .and_then(|s| s.voice_output)
             .unwrap_or(true);
+        let silence_limit_s = Self::config_path()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|s| serde_json::from_str::<PersistedState>(&s).ok())
+            .and_then(|s| s.auto_send_silence)
+            .unwrap_or(4);
         let mut app = ChatApp {
             models: Vec::new(),
             messages: VecDeque::new(),
@@ -316,6 +327,10 @@ impl ChatApp {
             )),
             tts_tx: channel::<String>().0,
             tts_stop_tx: channel::<()>().0,
+            silence_limit_s,
+            silence_limit_ms: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(
+                silence_limit_s * 1000,
+            )),
         };
         app.spawn_tts_worker();
         // Au démarrage : récupérer la liste des modèles ; le dernier modèle
@@ -407,6 +422,7 @@ impl ChatApp {
                 last_model: self.selected_model.clone(),
                 font_scale: Some(self.font_scale),
                 voice_output: Some(self.voice_output_enabled),
+                auto_send_silence: Some(self.silence_limit_s),
             };
             if let Ok(json) = serde_json::to_string_pretty(&state) {
                 let _ = std::fs::write(path, json);
@@ -583,14 +599,14 @@ impl ChatApp {
     /// de parole, demande l'arrêt et l'envoi automatique au modèle.
     fn spawn_recording_watcher(&mut self) {
         let tx = self.event_tx.clone();
+        let silence_limit_ms = self.silence_limit_ms.clone();
         std::thread::spawn(move || {
             const INTERVAL_MS: u64 = 400;
-            const SILENCE_LIMIT_MS: u32 = 4000;
+            const CALIBRATION_MS: u32 = 1200;
             const MAX_RECORD_MS: u32 = 90_000;
             const SAMPLES_PER_SEC: usize = 16_000;
 
             let path = std::env::temp_dir().join("chat-local-rec.wav");
-            const CALIBRATION_MS: u32 = 1200;
 
             let mut floor = f64::INFINITY; // niveau ambiant estimé
             let mut spoke = false;
@@ -669,7 +685,9 @@ impl ChatApp {
                     silence_ms += INTERVAL_MS as u32;
                 }
 
-                if (spoke && silence_ms >= SILENCE_LIMIT_MS) || elapsed_ms >= MAX_RECORD_MS {
+                if (spoke && silence_ms >= silence_limit_ms.load(std::sync::atomic::Ordering::Relaxed))
+                    || elapsed_ms >= MAX_RECORD_MS
+                {
                     let _ = tx.send(ApiEvent::AutoStopRecording);
                     break;
                 }
@@ -1148,9 +1166,13 @@ impl eframe::App for ChatApp {
                     }
                 }
 
-                // Taille des caractères et voix du modèle, à droite de la barre.
+                // Voix du modèle, réglage d'auto-envoi et taille des caractères.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let voice = if self.voice_output_enabled { "🔊" } else { "🔇" };
+                    let voice = if self.voice_output_enabled {
+                        "🔊 Voix : ON"
+                    } else {
+                        "🔇 Voix : OFF"
+                    };
                     if ui
                         .button(voice)
                         .on_hover_text("Lire les réponses du modèle à voix haute")
@@ -1167,6 +1189,23 @@ impl eframe::App for ChatApp {
                         );
                         self.persist_state();
                     }
+
+                    ui.label("Auto-envoi :");
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut self.silence_limit_s)
+                                .range(1..=10)
+                                .suffix(" s"),
+                        )
+                        .changed()
+                    {
+                        self.silence_limit_ms.store(
+                            self.silence_limit_s * 1000,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                        self.persist_state();
+                    }
+                    ui.weak("⏳");
                     ui.separator();
                     if ui.button("A−").clicked() {
                         self.font_scale = (self.font_scale - 0.1).max(0.5);
