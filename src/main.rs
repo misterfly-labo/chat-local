@@ -17,7 +17,7 @@ const STATS_REFRESH: Duration = Duration::from_secs(2);
 // --- Chat vocal ---
 const STT_URL: &str = "http://localhost:13305/v1/audio/transcriptions";
 const TTS_URL: &str = "http://localhost:13305/v1/audio/speech";
-const STT_MODEL: &str = "Whisper-Base";
+const STT_MODEL: &str = "Whisper-Small";
 const STT_LANG: &str = "fr";
 const TTS_MODEL: &str = "kokoro-v1";
 const TTS_VOICE: &str = "ff_siwis"; // voix française (Kokoro)
@@ -511,8 +511,8 @@ impl ChatApp {
         }
         let path = std::env::temp_dir().join("chat-local-rec.wav");
         let _ = std::fs::remove_file(&path);
-        match std::process::Command::new("arecord")
-            .args(["-q", "-f", "S16_LE", "-r", "16000", "-c", "1"])
+        match std::process::Command::new("pw-record")
+            .args(["--format", "s16", "--rate", "16000", "--channels", "1"])
             .arg(&path)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
