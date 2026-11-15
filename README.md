@@ -4,6 +4,8 @@ Interface graphique en Rust (eframe/egui) pour discuter — au clavier **et à l
 
 ![Rust](https://img.shields.io/badge/Rust-1.7-orange) ![License](https://img.shields.io/badge/License-MIT-blue)
 
+![Capture d'écran de chat-local](screenshot.png)
+
 ## Fonctionnalités
 
 - **Chat complet** : historique conservé et renvoyé au modèle à chaque message, bulles de messages avec retour à la ligne automatique
