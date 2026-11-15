@@ -35,6 +35,20 @@ fn http_client(timeout: Duration) -> reqwest::blocking::Client {
         .expect("création du client HTTP")
 }
 
+/// Comme error_for_status, mais inclut le corps de la réponse d'erreur du
+/// serveur dans le message (bien plus utile qu'un simple « 500 »).
+fn check_status(
+    response: reqwest::blocking::Response,
+) -> Result<reqwest::blocking::Response, anyhow::Error> {
+    if response.status().is_success() {
+        return Ok(response);
+    }
+    let status = response.status();
+    let body = response.text().unwrap_or_default();
+    let body = body.chars().take(300).collect::<String>();
+    Err(anyhow::anyhow!("HTTP {status} — {body}"))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Message {
     role: String,
@@ -302,7 +316,7 @@ impl ChatApp {
                             "response_format": "wav",
                         }))
                         .send()?;
-                    let response = response.error_for_status()?;
+                    let response = check_status(response)?;
                     let bytes = response.bytes()?;
                     std::fs::write(&path, bytes)?;
                     Ok(())
@@ -377,7 +391,7 @@ impl ChatApp {
             let result = (|| -> Result<(Vec<LLMConfig>, Option<f64>), anyhow::Error> {
                 let client = http_client(FAST_TIMEOUT);
                 let response = client.get(MODELS_URL).send()?;
-                let response = response.error_for_status()?;
+                let response = check_status(response)?;
                 let models_data: ModelsResponse = response.json()?;
                 let models = models_data
                     .data
@@ -480,7 +494,8 @@ impl ChatApp {
                 .post(UNLOAD_URL)
                 .json(&serde_json::json!({ "model_name": target }))
                 .send()
-                .and_then(|r| r.error_for_status());
+                .map_err(anyhow::Error::from)
+                .and_then(check_status);
 
             match result {
                 Ok(_) => {
@@ -529,6 +544,15 @@ impl ChatApp {
         if !path.exists() {
             return;
         }
+        // WAV 16 kHz mono 16 bits : ~32 000 octets par seconde d'audio.
+        // En dessous de 0,4 s, le serveur Whisper renvoie une erreur 500.
+        const MIN_WAV_BYTES: u64 = 44 + 32_000 * 2 / 5;
+        if let Ok(len) = std::fs::metadata(&path).map(|m| m.len()) {
+            if len < MIN_WAV_BYTES {
+                self.error = Some("Enregistrement trop court — maintenez plus longtemps le micro.".to_string());
+                return;
+            }
+        }
         self.is_transcribing = true;
         self.error = None;
         let tx = self.event_tx.clone();
@@ -544,7 +568,7 @@ impl ChatApp {
                     .post(STT_URL)
                     .multipart(form)
                     .send()?;
-                let response = response.error_for_status()?;
+                let response = check_status(response)?;
                 let body: serde_json::Value = response.json()?;
                 Ok(body
                     .get("text")
@@ -614,7 +638,7 @@ impl ChatApp {
                     .post(LOAD_URL)
                     .json(&serde_json::json!({ "model_name": model }))
                     .send()?;
-                let response = response.error_for_status()?;
+                let response = check_status(response)?;
                 let body: serde_json::Value = response.json()?;
                 if body.get("status").and_then(|s| s.as_str()) == Some("success") {
                     Ok(())
@@ -744,7 +768,7 @@ impl ChatApp {
                         "messages": history,
                     }))
                     .send()?;
-                let response = response.error_for_status()?;
+                let response = check_status(response)?;
                 let chat: ChatCompletionResponse = response.json()?;
                 let mut msg = chat
                     .choices
