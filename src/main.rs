@@ -338,6 +338,18 @@ impl ChatApp {
             .and_then(|m| m.size_gb)
     }
 
+    /// Met en forme la conversation pour copie (texte brut).
+    fn conversation_as_text(messages: &VecDeque<Message>) -> String {
+        messages
+            .iter()
+            .map(|m| {
+                let who = if m.role == "user" { "👤 Moi" } else { "🤖 Assistant" };
+                format!("{who} :\n{}\n", m.content)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     /// Charge le modèle sélectionné dans le NPU via POST /v1/load (thread dédié).
     fn load_selected_model(&mut self, force: bool) {
         if self.loading_model || self.selected_model.is_empty() {
@@ -633,6 +645,16 @@ impl eframe::App for ChatApp {
                     self.load_selected_model(false);
                 }
 
+                // Gestion de l'historique.
+                if !self.messages.is_empty() {
+                    if ui.button("📋 Copier tout").clicked() {
+                        ctx.copy_text(Self::conversation_as_text(&self.messages));
+                    }
+                    if ui.button("🗑 Effacer").clicked() {
+                        self.messages.clear();
+                    }
+                }
+
                 // État de chargement du modèle dans le NPU.
                 if self.loading_model {
                     ui.add(egui::Spinner::default());
@@ -664,12 +686,17 @@ impl eframe::App for ChatApp {
                 }
                 for msg in &self.messages {
                     ui.horizontal(|ui| {
-                        if msg.role == "user" {
-                            ui.label("👤");
-                            ui.colored_label(egui::Color32::LIGHT_BLUE, &msg.content);
+                        let (icon, color, text) = if msg.role == "user" {
+                            ("👤", egui::Color32::LIGHT_BLUE, &msg.content)
                         } else {
-                            ui.label("🤖");
-                            ui.colored_label(egui::Color32::LIGHT_GREEN, &msg.content);
+                            ("🤖", egui::Color32::LIGHT_GREEN, &msg.content)
+                        };
+                        ui.label(icon);
+                        ui.colored_label(color, text);
+
+                        // Copier ce message en particulier.
+                        if ui.small_button("📋").clicked() {
+                            ctx.copy_text(msg.content.clone());
                         }
                     });
                     ui.separator();
