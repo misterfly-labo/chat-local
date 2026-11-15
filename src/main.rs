@@ -1254,27 +1254,39 @@ impl eframe::App for ChatApp {
                     });
                 }
                 for msg in &self.messages {
-                    ui.horizontal(|ui| {
-                        let (icon, color, text) = if msg.role == "user" {
-                            ("👤", egui::Color32::LIGHT_BLUE, &msg.content)
-                        } else {
-                            ("🤖", egui::Color32::LIGHT_GREEN, &msg.content)
-                        };
-                        ui.label(icon);
-                        ui.colored_label(color, text);
+                    let (icon, color, name) = if msg.role == "user" {
+                        ("👤", egui::Color32::LIGHT_BLUE, "Moi")
+                    } else {
+                        ("🤖", egui::Color32::LIGHT_GREEN, "Assistant")
+                    };
 
-                        // Copier ce message en particulier.
-                        if ui.small_button("📋").clicked() {
-                            copy_persistent(ctx, msg.content.clone());
-                        }
+                    // Bulle pleine largeur : le texte est dans un layout
+                    // vertical, il retourne à la ligne dans le cadre.
+                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                        ui.set_min_width(ui.available_width() - 12.0);
+                        ui.horizontal(|ui| {
+                            ui.label(icon);
+                            ui.strong(name);
+                            if msg.role != "user" {
+                                if let (Some(d), Some(t)) =
+                                    (msg.duration_secs, msg.tokens_per_sec)
+                                {
+                                    ui.weak(format!("⏱ {d:.1} s · {t:.0} tokens/s"));
+                                }
+                            }
+                            // Copier ce message en particulier.
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.small_button("📋").clicked() {
+                                        copy_persistent(ctx, msg.content.clone());
+                                    }
+                                },
+                            );
+                        });
+                        ui.colored_label(color, &msg.content);
                     });
-                    // Temps total et débit moyen de la génération.
-                    if msg.role != "user" {
-                        if let (Some(d), Some(t)) = (msg.duration_secs, msg.tokens_per_sec) {
-                            ui.weak(format!("⏱ {d:.1} s · {t:.0} tokens/s"));
-                        }
-                    }
-                    ui.separator();
+                    ui.add_space(3.0);
                 }
             });
         });
