@@ -14,6 +14,14 @@ const STATS_URL: &str = "http://localhost:13305/v1/system-stats";
 const SYSTEM_INFO_URL: &str = "http://localhost:13305/v1/system-info";
 const STATS_REFRESH: Duration = Duration::from_secs(2);
 
+// --- Chat vocal ---
+const STT_URL: &str = "http://localhost:13305/v1/audio/transcriptions";
+const TTS_URL: &str = "http://localhost:13305/v1/audio/speech";
+const STT_MODEL: &str = "Whisper-Base";
+const STT_LANG: &str = "fr";
+const TTS_MODEL: &str = "kokoro-v1";
+const TTS_VOICE: &str = "ff_siwis"; // voix française (Kokoro)
+
 // Timeouts adaptés à chaque type de requête : la génération LLM et le
 // chargement d'un modèle dans le NPU peuvent prendre plusieurs minutes.
 const FAST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -124,6 +132,8 @@ struct PersistedState {
     last_model: String,
     /// Facteur de zoom de la police (1.0 = taille normale).
     font_scale: Option<f32>,
+    /// Lire les réponses du modèle à voix haute.
+    voice_output: Option<bool>,
 }
 
 /// Copie dans le presse-papiers ET lance un process détaché qui conserve
@@ -148,6 +158,10 @@ enum ApiEvent {
     StatsUpdated(Option<SystemStats>, Option<LoadedModelInfo>),
     Reply(Message),
     Error(String),
+    /// Transcription vocale prête (voir stop_recording).
+    Transcribed(String),
+    /// Le synthétiseur commence (true) ou finit (false) de parler.
+    Speaking(bool),
 }
 
 struct ChatApp {
@@ -178,6 +192,20 @@ struct ChatApp {
     /// Facteur de zoom de la police, persisté dans la config.
     font_scale: f32,
     scale_applied: bool,
+    // --- Chat vocal ---
+    /// Process arecord quand un enregistrement est en cours.
+    recorder: Option<std::process::Child>,
+    /// Transcription Whisper en cours.
+    is_transcribing: bool,
+    /// File d'attente des textes à dire, consommée par le worker TTS.
+    tts_tx: Sender<String>,
+    /// Signal d'interruption de la lecture en cours (démarrage du micro).
+    tts_stop_tx: Sender<()>,
+    /// État partagé du bouton « voix du modèle ».
+    voice_enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    voice_output_enabled: bool,
+    /// Le modèle est en train de parler.
+    speaking: bool,
 }
 
 /// Lit la mémoire résidente (VmRSS) du process qui pilote le NPU.
@@ -202,6 +230,11 @@ impl ChatApp {
             .and_then(|s| serde_json::from_str::<PersistedState>(&s).ok())
             .and_then(|s| s.font_scale)
             .unwrap_or(1.0);
+        let voice_output_enabled = Self::config_path()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|s| serde_json::from_str::<PersistedState>(&s).ok())
+            .and_then(|s| s.voice_output)
+            .unwrap_or(true);
         let mut app = ChatApp {
             models: Vec::new(),
             messages: VecDeque::new(),
@@ -224,11 +257,86 @@ impl ChatApp {
             want_input_focus: true,
             font_scale,
             scale_applied: false,
+            recorder: None,
+            is_transcribing: false,
+            speaking: false,
+            voice_output_enabled,
+            voice_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                voice_output_enabled,
+            )),
+            tts_tx: channel::<String>().0,
+            tts_stop_tx: channel::<()>().0,
         };
+        app.spawn_tts_worker();
         // Au démarrage : récupérer la liste des modèles ; le dernier modèle
         // utilisé sera ensuite chargé dans le NPU automatiquement.
         app.load_models();
         app
+    }
+
+    /// Worker séquentiel : synthétise puis joue les textes un par un.
+    fn spawn_tts_worker(&mut self) {
+        let (tts_tx, tts_rx) = channel::<String>();
+        let (stop_tx, stop_rx) = channel::<()>();
+        let enabled = self.voice_enabled.clone();
+        let tx = self.event_tx.clone();
+        self.tts_tx = tts_tx;
+        self.tts_stop_tx = stop_tx;
+        std::thread::spawn(move || {
+            for text in tts_rx {
+                // Vider les demandes d'interruption reçues pendant l'inactivité.
+                while stop_rx.try_recv().is_ok() {}
+                if !enabled.load(std::sync::atomic::Ordering::Relaxed) {
+                    continue;
+                }
+                let _ = tx.send(ApiEvent::Speaking(true));
+
+                let path = std::env::temp_dir().join("chat-local-tts.wav");
+                let spoken = (|| -> Result<(), anyhow::Error> {
+                    let response = http_client(CHAT_TIMEOUT)
+                        .post(TTS_URL)
+                        .json(&serde_json::json!({
+                            "model": TTS_MODEL,
+                            "input": text,
+                            "voice": TTS_VOICE,
+                            "response_format": "wav",
+                        }))
+                        .send()?;
+                    let response = response.error_for_status()?;
+                    let bytes = response.bytes()?;
+                    std::fs::write(&path, bytes)?;
+                    Ok(())
+                })();
+
+                if spoken.is_ok() {
+                    if let Ok(mut child) = std::process::Command::new("pw-play")
+                        .arg(&path)
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn()
+                    {
+                        // Jouer, mais interrompre si le micro se déclenche.
+                        loop {
+                            if stop_rx.try_recv().is_ok() {
+                                let _ = child.kill();
+                                let _ = child.wait();
+                                break;
+                            }
+                            match child.try_wait() {
+                                Ok(Some(_)) => break,
+                                Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+                                Err(_) => break,
+                            }
+                        }
+                    }
+                } else {
+                    let _ = tx.send(ApiEvent::Error(
+                        "Synthèse vocale impossible (kokoro-v1)".to_string(),
+                    ));
+                }
+                let _ = tx.send(ApiEvent::Speaking(false));
+            }
+        });
     }
 
     /// Chemin du fichier de configuration (XDG ou $HOME/.config).
@@ -248,6 +356,7 @@ impl ChatApp {
             let state = PersistedState {
                 last_model: self.selected_model.clone(),
                 font_scale: Some(self.font_scale),
+                voice_output: Some(self.voice_output_enabled),
             };
             if let Ok(json) = serde_json::to_string_pretty(&state) {
                 let _ = std::fs::write(path, json);
@@ -385,9 +494,87 @@ impl ChatApp {
         });
     }
 
+    // === Chat vocal ===
+
+    /// Démarre ou arrête l'enregistrement du micro.
+    fn toggle_recording(&mut self) {
+        if let Some(mut child) = self.recorder.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+            // Interrompre la voix du modèle pour ne pas la réenregistrer.
+            let _ = self.tts_stop_tx.send(());
+            self.transcribe_recording();
+            return;
+        }
+        if self.is_transcribing || self.is_generating {
+            return;
+        }
+        let path = std::env::temp_dir().join("chat-local-rec.wav");
+        let _ = std::fs::remove_file(&path);
+        match std::process::Command::new("arecord")
+            .args(["-q", "-f", "S16_LE", "-r", "16000", "-c", "1"])
+            .arg(&path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(child) => self.recorder = Some(child),
+            Err(e) => self.error = Some(format!("Enregistrement impossible : {e}")),
+        }
+    }
+
+    /// Transcrit le fichier enregistré puis envoie le texte au modèle.
+    fn transcribe_recording(&mut self) {
+        let path = std::env::temp_dir().join("chat-local-rec.wav");
+        if !path.exists() {
+            return;
+        }
+        self.is_transcribing = true;
+        self.error = None;
+        let tx = self.event_tx.clone();
+        std::thread::spawn(move || {
+            let result = (|| -> Result<String, anyhow::Error> {
+                let file = reqwest::blocking::multipart::Part::file(&path)?;
+                let form = reqwest::blocking::multipart::Form::new()
+                    .text("model", STT_MODEL)
+                    .text("language", STT_LANG)
+                    .text("response_format", "json")
+                    .part("file", file);
+                let response = http_client(CHAT_TIMEOUT)
+                    .post(STT_URL)
+                    .multipart(form)
+                    .send()?;
+                let response = response.error_for_status()?;
+                let body: serde_json::Value = response.json()?;
+                Ok(body
+                    .get("text")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string())
+            })();
+
+            match result {
+                Ok(text) => {
+                    let _ = tx.send(ApiEvent::Transcribed(text));
+                }
+                Err(e) => {
+                    let _ = tx.send(ApiEvent::Error(format!("Transcription : {e}")));
+                }
+            }
+        });
+    }
+
+    /// Fait lire une réponse par le synthétiseur, si la voix est activée.
+    fn speak(&self, text: String) {
+        if !self.voice_output_enabled || text.trim().is_empty() {
+            return;
+        }
+        let _ = self.tts_tx.send(text);
+    }
+
     /// Taille des poids du modèle résident, d'après la liste des modèles.
-    fn loaded_model_size_gb(&self) -> Option<f64> {
-        let info = self.loaded_model_info.as_ref()?;
+    fn loaded_model_size_gb(&self) -> Option<f64> {        let info = self.loaded_model_info.as_ref()?;
         self.models
             .iter()
             .find(|m| m.id == info.model_name)
@@ -483,8 +670,22 @@ impl ChatApp {
                     self.last_stats = Instant::now();
                 }
                 ApiEvent::Reply(msg) => {
-                    self.messages.push_back(msg);
+                    self.messages.push_back(msg.clone());
                     self.is_generating = false;
+                    let content = msg.content;
+                    self.speak(content);
+                }
+                ApiEvent::Transcribed(text) => {
+                    self.is_transcribing = false;
+                    if text.is_empty() {
+                        self.error = Some("Rien à transcrire (silence ?)".to_string());
+                    } else {
+                        self.input_text = text;
+                        self.send_message();
+                    }
+                }
+                ApiEvent::Speaking(speaking) => {
+                    self.speaking = speaking;
                 }
                 ApiEvent::Error(e) => {
                     // Éviter une boucle de réessai auto : considérer le modèle comme traité.
@@ -495,6 +696,7 @@ impl ChatApp {
                     self.is_generating = false;
                     self.loading_model = false;
                     self.purge_in_progress = false;
+                    self.is_transcribing = false;
                 }
             }
         }
@@ -578,9 +780,17 @@ impl ChatApp {
 }
 
 impl eframe::App for ChatApp {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Arrêter l'enregistrement et la lecture vocale à la fermeture.
+        if let Some(mut child) = self.recorder.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        let _ = self.tts_stop_tx.send(());
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_events();
-
         // Appliquer le zoom de police restauré, une seule fois.
         if !self.scale_applied {
             if self.font_scale != 1.0 {
@@ -590,7 +800,9 @@ impl eframe::App for ChatApp {
         }
 
         // Garder l'UI animée (spinner) tant qu'une requête est en cours.
-        if self.is_generating || self.loading_model || self.stats_loading {
+        if self.is_generating || self.loading_model || self.stats_loading
+            || self.is_transcribing || self.speaking || self.recorder.is_some()
+        {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         } else if self.last_stats.elapsed() >= STATS_REFRESH {
             self.refresh_stats();
@@ -603,6 +815,27 @@ impl eframe::App for ChatApp {
         egui::TopBottomPanel::bottom("input_bar").show(ctx, |ui| {
             ui.add_space(5.0);
             ui.horizontal(|ui| {
+                // Bouton micro : enregistrer / arrêter / transcription en cours.
+                if self.is_transcribing {
+                    ui.add(egui::Spinner::default());
+                } else {
+                    let mic = if self.recorder.is_some() {
+                        ui.add(
+                            egui::Button::new(egui::RichText::new("⏹ Arrêter")
+                                .color(egui::Color32::WHITE))
+                                .fill(egui::Color32::from_rgb(180, 60, 60)),
+                        )
+                    } else {
+                        ui.button("🎤 Parler")
+                    };
+                    if mic.clicked() {
+                        self.toggle_recording();
+                    }
+                }
+                if self.recorder.is_some() {
+                    ui.weak("🎙 à toi de parler…");
+                }
+
                 let send = ui.add_enabled(
                     !self.is_generating && !self.loading_model && !self.models.is_empty(),
                     egui::Button::new("Envoyer"),
@@ -679,6 +912,10 @@ impl eframe::App for ChatApp {
 
                 // Bouton de purge, aligné à droite.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if self.speaking {
+                        ui.add(egui::Spinner::default());
+                        ui.weak("🔊 dit la réponse…");
+                    }
                     let purge = ui.add_enabled(
                         self.loaded_model_info.is_some() && !self.purge_in_progress,
                         egui::Button::new("🧹 Purger le NPU"),
@@ -742,8 +979,25 @@ impl eframe::App for ChatApp {
                     }
                 }
 
-                // Taille des caractères, à droite de la barre.
+                // Taille des caractères et voix du modèle, à droite de la barre.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let voice = if self.voice_output_enabled { "🔊" } else { "🔇" };
+                    if ui
+                        .button(voice)
+                        .on_hover_text("Lire les réponses du modèle à voix haute")
+                        .clicked()
+                    {
+                        if self.voice_output_enabled {
+                            // Couper immédiatement la lecture en cours.
+                            let _ = self.tts_stop_tx.send(());
+                        }
+                        self.voice_output_enabled = !self.voice_output_enabled;
+                        self.voice_enabled.store(
+                            self.voice_output_enabled,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                        self.persist_state();
+                    }
                     ui.separator();
                     if ui.button("A−").clicked() {
                         self.font_scale = (self.font_scale - 0.1).max(0.5);
