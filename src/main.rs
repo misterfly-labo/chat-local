@@ -767,7 +767,7 @@ impl ChatApp {
         messages
             .iter()
             .map(|m| {
-                let who = if m.role == "user" { "👤 Moi" } else { "🤖 Assistant" };
+                let who = if m.role == "user" { "👤 Moi" } else { "✨ Assistant" };
                 format!("{who} :\n{}\n", m.content)
             })
             .collect::<Vec<_>>()
@@ -1085,7 +1085,7 @@ impl eframe::App for ChatApp {
                 ui.separator();
                 match &self.loaded_model_info {
                     Some(m) => {
-                        ui.weak(format!("🧠 {} ({})", m.model_name, m.device));
+                        ui.weak(format!("💾 {} ({})", m.model_name, m.device));
                         if let Some(rss) = m.rss_gb {
                             ui.weak(format!("{rss:.1} Go en mémoire"));
                         } else if let Some(size) = self.loaded_model_size_gb() {
@@ -1105,7 +1105,7 @@ impl eframe::App for ChatApp {
                     }
                     let purge = ui.add_enabled(
                         self.loaded_model_info.is_some() && !self.purge_in_progress,
-                        egui::Button::new("🧹 Purger le NPU"),
+                        egui::Button::new("♻ Purger le NPU"),
                     );
                     if purge.clicked() {
                         self.purge_npu();
@@ -1257,7 +1257,7 @@ impl eframe::App for ChatApp {
                     let (icon, color, name) = if msg.role == "user" {
                         ("👤", egui::Color32::LIGHT_BLUE, "Moi")
                     } else {
-                        ("🤖", egui::Color32::LIGHT_GREEN, "Assistant")
+                        ("✨", egui::Color32::LIGHT_GREEN, "Assistant")
                     };
 
                     // Bulle pleine largeur : le texte est dans un layout
