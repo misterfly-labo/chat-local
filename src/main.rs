@@ -758,8 +758,12 @@ impl eframe::App for ChatApp {
 
             ui.add_space(10.0);
 
-            // Historique de la conversation
-            egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            // Historique de la conversation, qui suit automatiquement le bas
+            // à l'arrivée de nouvelles réponses.
+            egui::ScrollArea::vertical()
+                .auto_shrink(false)
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
                 if self.messages.is_empty() {
                     ui.weak(if self.models.is_empty() {
                         "Cliquez sur « Charger les modèles » pour commencer."
