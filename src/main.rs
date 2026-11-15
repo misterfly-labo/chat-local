@@ -31,11 +31,18 @@ fn http_client(timeout: Duration) -> reqwest::blocking::Client {
 struct Message {
     role: String,
     content: String,
+    /// Temps total (aller-retour) pour obtenir cette réponse, en secondes.
+    #[serde(skip_serializing, skip_deserializing, default)]
+    duration_secs: Option<f64>,
+    /// Débit de génération moyen, en tokens/s.
+    #[serde(skip_serializing, skip_deserializing, default)]
+    tokens_per_sec: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ChatCompletionResponse {
     choices: Vec<Choice>,
+    usage: Option<Usage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +50,14 @@ struct Choice {
     message: Message,
     index: u32,
     finish_reason: String,
+}
+
+/// Compteurs standard OpenAI renvoyés par Lemonade.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Usage {
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    total_tokens: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,6 +122,8 @@ struct LoadedModelInfo {
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct PersistedState {
     last_model: String,
+    /// Facteur de zoom de la police (1.0 = taille normale).
+    font_scale: Option<f32>,
 }
 
 /// Événement renvoyé par les threads HTTP vers le thread UI.
@@ -143,6 +160,9 @@ struct ChatApp {
     saved_model: String,
     /// Vrai au premier rendu : donner le focus au champ de saisie.
     want_input_focus: bool,
+    /// Facteur de zoom de la police, persisté dans la config.
+    font_scale: f32,
+    scale_applied: bool,
 }
 
 /// Lit la mémoire résidente (VmRSS) du process qui pilote le NPU.
@@ -162,7 +182,11 @@ impl ChatApp {
             .and_then(|s| serde_json::from_str::<PersistedState>(&s).ok())
             .map(|s| s.last_model)
             .unwrap_or_default();
-        let mut app = ChatApp {
+        let font_scale = Self::config_path()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|s| serde_json::from_str::<PersistedState>(&s).ok())
+            .and_then(|s| s.font_scale)
+            .unwrap_or(1.0);        let mut app = ChatApp {
             models: Vec::new(),
             messages: VecDeque::new(),
             input_text: String::new(),
@@ -182,6 +206,8 @@ impl ChatApp {
             last_stats: Instant::now() - STATS_REFRESH,
             saved_model,
             want_input_focus: true,
+            font_scale,
+            scale_applied: false,
         };
         // Au démarrage : charger la liste des modèles ; le dernier modèle
         // utilisé sera ensuite sélectionné puis chargé dans le NPU automatiquement.
@@ -197,14 +223,15 @@ impl ChatApp {
         Some(dir.join("chat-local").join("config.json"))
     }
 
-    /// Enregistre le dernier modèle utilisé sur disque.
-    fn persist_last_model(&self) {
+    /// Enregistre le dernier modèle utilisé et le zoom sur disque.
+    fn persist_state(&self) {
         if let Some(path) = Self::config_path() {
             if let Some(dir) = path.parent() {
                 let _ = std::fs::create_dir_all(dir);
             }
             let state = PersistedState {
                 last_model: self.selected_model.clone(),
+                font_scale: Some(self.font_scale),
             };
             if let Ok(json) = serde_json::to_string_pretty(&state) {
                 let _ = std::fs::write(path, json);
@@ -427,7 +454,7 @@ impl ChatApp {
                     self.loaded_model = model;
                     self.loading_model = false;
                     self.saved_model = self.selected_model.clone();
-                    self.persist_last_model();
+                    self.persist_state();
                 }
                 ApiEvent::StatsUpdated(stats, loaded) => {
                     self.stats = stats;
@@ -475,9 +502,14 @@ impl ChatApp {
         // Cloner le texte AVANT de vider le champ de saisie.
         self.input_text.clear();
         self.messages
-            .push_back(Message { role: "user".to_string(), content: text });
+            .push_back(Message {
+                role: "user".to_string(),
+                content: text,
+                duration_secs: None,
+                tokens_per_sec: None,
+            });
         self.saved_model = self.selected_model.clone();
-        self.persist_last_model();
+        self.persist_state();
 
         self.is_generating = true;
         self.error = None;
@@ -486,6 +518,7 @@ impl ChatApp {
         let tx = self.event_tx.clone();
         std::thread::spawn(move || {
             let result = (|| -> Result<Message, anyhow::Error> {
+                let started = Instant::now();
                 let response = http_client(CHAT_TIMEOUT)
                     .post(&config.endpoint)
                     .json(&serde_json::json!({
@@ -495,11 +528,25 @@ impl ChatApp {
                     .send()?;
                 let response = response.error_for_status()?;
                 let chat: ChatCompletionResponse = response.json()?;
-                chat.choices
+                let mut msg = chat
+                    .choices
                     .into_iter()
                     .next()
                     .map(|c| c.message)
-                    .ok_or_else(|| anyhow::anyhow!("réponse vide du serveur"))
+                    .ok_or_else(|| anyhow::anyhow!("réponse vide du serveur"))?;
+
+                // Temps total et débit moyen : compteurs du serveur si
+                // disponibles, sinon estimation par la longueur du texte.
+                let elapsed = started.elapsed().as_secs_f64();
+                let tokens = chat
+                    .usage
+                    .map(|u| u.completion_tokens as f64)
+                    .unwrap_or_else(|| msg.content.len() as f64 / 4.0);
+                if elapsed > 0.0 {
+                    msg.duration_secs = Some(elapsed);
+                    msg.tokens_per_sec = Some(tokens / elapsed);
+                }
+                Ok(msg)
             })();
 
             match result {
@@ -517,6 +564,14 @@ impl ChatApp {
 impl eframe::App for ChatApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_events();
+
+        // Appliquer le zoom de police restauré, une seule fois.
+        if !self.scale_applied {
+            if self.font_scale != 1.0 {
+                ctx.set_zoom_factor(self.font_scale);
+            }
+            self.scale_applied = true;
+        }
 
         // Garder l'UI animée (spinner) tant qu'une requête est en cours.
         if self.is_generating || self.loading_model || self.stats_loading {
@@ -668,6 +723,21 @@ impl eframe::App for ChatApp {
                     }
                 }
 
+                // Taille des caractères, à droite de la barre.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("A−").clicked() {
+                        self.font_scale = (self.font_scale - 0.1).max(0.5);
+                        ctx.set_zoom_factor(self.font_scale);
+                        self.persist_state();
+                    }
+                    if ui.button("A+").clicked() {
+                        self.font_scale = (self.font_scale + 0.1).min(2.5);
+                        ctx.set_zoom_factor(self.font_scale);
+                        self.persist_state();
+                    }
+                    ui.weak(format!("{:.0} %", self.font_scale * 100.0));
+                });
+
                 // État de chargement du modèle dans le NPU.
                 if self.loading_model {
                     ui.add(egui::Spinner::default());
@@ -712,6 +782,12 @@ impl eframe::App for ChatApp {
                             ctx.copy_text(msg.content.clone());
                         }
                     });
+                    // Temps total et débit moyen de la génération.
+                    if msg.role != "user" {
+                        if let (Some(d), Some(t)) = (msg.duration_secs, msg.tokens_per_sec) {
+                            ui.weak(format!("⏱ {d:.1} s · {t:.0} tokens/s"));
+                        }
+                    }
                     ui.separator();
                 }
             });
