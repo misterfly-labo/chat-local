@@ -1,1 +1,0 @@
-cargo:rustc-env=MIME_TYPES_GENERATED_PATH=/home/enky/Documents/opencode/chat-local/src/target/release/build/mime_guess-63c7e7a041381b0a/out/mime_types_generated.rs
