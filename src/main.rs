@@ -5,6 +5,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 
 const MODELS_URL: &str = "http://localhost:13305/v1/models";
 const CHAT_URL: &str = "http://localhost:13305/v1/chat/completions";
+const LOAD_URL: &str = "http://localhost:13305/v1/load";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Message {
@@ -47,6 +48,7 @@ struct LLMConfig {
 /// Événement renvoyé par les threads HTTP vers le thread UI.
 enum ApiEvent {
     ModelsLoaded(Vec<LLMConfig>),
+    ModelLoaded(String),
     Reply(Message),
     Error(String),
 }
@@ -57,6 +59,11 @@ struct ChatApp {
     input_text: String,
     selected_model: String,
     is_generating: bool,
+    /// Modèle en cours de chargement dans le NPU.
+    loading_model: bool,
+    /// Dernier modèle pour lequel un chargement a été demandé/terminé.
+    requested_model: String,
+    loaded_model: String,
     error: Option<String>,
     event_tx: Sender<ApiEvent>,
     event_rx: Receiver<ApiEvent>,
@@ -71,6 +78,9 @@ impl ChatApp {
             input_text: String::new(),
             selected_model: String::new(),
             is_generating: false,
+            loading_model: false,
+            requested_model: String::new(),
+            loaded_model: String::new(),
             error: None,
             event_tx,
             event_rx,
@@ -113,6 +123,48 @@ impl ChatApp {
         });
     }
 
+    /// Charge le modèle sélectionné dans le NPU via POST /v1/load (thread dédié).
+    fn load_selected_model(&mut self, force: bool) {
+        if self.loading_model || self.selected_model.is_empty() {
+            return;
+        }
+        // Ne recharger que si le modèle demandé change, sauf demande explicite.
+        if !force && self.selected_model == self.requested_model {
+            return;
+        }
+        self.requested_model = self.selected_model.clone();
+        self.loading_model = true;
+        self.error = None;
+
+        let model = self.selected_model.clone();
+        let tx = self.event_tx.clone();
+        std::thread::spawn(move || {
+            let result = (|| -> Result<(), anyhow::Error> {
+                let response = reqwest::blocking::Client::new()
+                    .post(LOAD_URL)
+                    .json(&serde_json::json!({ "model_name": model }))
+                    .send()?;
+                let response = response.error_for_status()?;
+                let body: serde_json::Value = response.json()?;
+                if body.get("status").and_then(|s| s.as_str()) == Some("success") {
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!("statut inattendu du serveur"))
+                }
+            })();
+
+            match result {
+                Ok(()) => {
+                    let _ = tx.send(ApiEvent::ModelLoaded(model));
+                }
+                Err(e) => {
+                    let _ =
+                        tx.send(ApiEvent::Error(format!("Chargement du modèle : {e}")));
+                }
+            }
+        });
+    }
+
     /// Récupère les résultats des threads HTTP sans bloquer l'UI.
     fn handle_events(&mut self) {
         while let Ok(event) = self.event_rx.try_recv() {
@@ -124,13 +176,22 @@ impl ChatApp {
                     self.models = models;
                     self.is_generating = false;
                 }
+                ApiEvent::ModelLoaded(model) => {
+                    self.loaded_model = model;
+                    self.loading_model = false;
+                }
                 ApiEvent::Reply(msg) => {
                     self.messages.push_back(msg);
                     self.is_generating = false;
                 }
                 ApiEvent::Error(e) => {
+                    // Éviter une boucle de réessai auto : considérer le modèle comme traité.
+                    if self.loading_model {
+                        self.loaded_model = self.selected_model.clone();
+                    }
                     self.error = Some(e);
                     self.is_generating = false;
+                    self.loading_model = false;
                 }
             }
         }
@@ -139,7 +200,7 @@ impl ChatApp {
     /// Envoie le message (et tout l'historique) au LLM dans un thread dédié.
     fn send_message(&mut self) {
         let text = self.input_text.trim().to_string();
-        if text.is_empty() || self.models.is_empty() || self.is_generating {
+        if text.is_empty() || self.models.is_empty() || self.is_generating || self.loading_model {
             return;
         }
         let Some(config) = self
@@ -196,7 +257,7 @@ impl eframe::App for ChatApp {
         self.handle_events();
 
         // Garder l'UI animée (spinner) tant qu'une requête est en cours.
-        if self.is_generating {
+        if self.is_generating || self.loading_model {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
 
@@ -227,6 +288,20 @@ impl eframe::App for ChatApp {
                     if ui.button("Actualiser").clicked() {
                         self.load_models();
                     }
+                    if ui.button("Charger dans le NPU").clicked() {
+                        self.load_selected_model(true);
+                    }
+
+                    // Charger automatiquement le modèle dès que la sélection change.
+                    self.load_selected_model(false);
+                }
+
+                // État de chargement du modèle dans le NPU.
+                if self.loading_model {
+                    ui.add(egui::Spinner::default());
+                    ui.weak(format!("Chargement de « {} » dans le NPU…", self.selected_model));
+                } else if self.selected_model == self.loaded_model && !self.loaded_model.is_empty() {
+                    ui.weak("✅ chargé");
                 }
                 if self.is_generating {
                     ui.add(egui::Spinner::default());
@@ -270,7 +345,7 @@ impl eframe::App for ChatApp {
             ui.add_space(5.0);
             ui.horizontal(|ui| {
                 let send = ui.add_enabled(
-                    !self.is_generating && !self.models.is_empty(),
+                    !self.is_generating && !self.loading_model && !self.models.is_empty(),
                     egui::Button::new("Envoyer"),
                 );
                 let input = ui.add_sized(
