@@ -261,6 +261,29 @@ impl eframe::App for ChatApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
 
+        // Barre de saisie dans un panneau fixe en bas : toujours visible et cliquable.
+        egui::TopBottomPanel::bottom("input_bar").show(ctx, |ui| {
+            ui.add_space(5.0);
+            ui.horizontal(|ui| {
+                let send = ui.add_enabled(
+                    !self.is_generating && !self.loading_model && !self.models.is_empty(),
+                    egui::Button::new("Envoyer"),
+                );
+                let input = ui.add_sized(
+                    [ui.available_width() - 10.0, 30.0],
+                    egui::TextEdit::singleline(&mut self.input_text).hint_text("Tapez votre message…"),
+                );
+
+                // Envoyer au clic ou avec Entrée quand le champ a le focus.
+                let enter = input.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if send.clicked() || enter {
+                    input.request_focus();
+                    self.send_message();
+                }
+            });
+            ui.add_space(5.0);
+        });
+
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Chat Lemonade");
             ui.add_space(10.0);
@@ -336,28 +359,6 @@ impl eframe::App for ChatApp {
                         }
                     });
                     ui.separator();
-                }
-                // Espace pour que la zone de saisie ne recouvre pas le dernier message.
-                ui.add_space(60.0);
-            });
-
-            // Zone de saisie, en bas du panneau
-            ui.add_space(5.0);
-            ui.horizontal(|ui| {
-                let send = ui.add_enabled(
-                    !self.is_generating && !self.loading_model && !self.models.is_empty(),
-                    egui::Button::new("Envoyer"),
-                );
-                let input = ui.add_sized(
-                    [ui.available_width() - 10.0, 30.0],
-                    egui::TextEdit::singleline(&mut self.input_text).hint_text("Tapez votre message…"),
-                );
-
-                // Envoyer au clic ou avec Entrée quand le champ a le focus.
-                let enter = input.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if send.clicked() || enter {
-                    input.request_focus();
-                    self.send_message();
                 }
             });
         });
