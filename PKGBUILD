@@ -6,17 +6,21 @@ pkgdesc="Interface graphique pour chatter avec les LLM de Lemonade"
 arch=('x86_64')
 url="https://github.com/misterfly-labo/chat-local"
 license=('MIT')
-depends=('openssl' 'fontconfig' 'gcc-libs' 'glibc' 'libx11' 'wayland' 'wl-clipboard')
+depends=('fontconfig' 'gcc-libs' 'glibc' 'libx11' 'wayland' 'wl-clipboard' 'pipewire')
 makedepends=('cargo' 'rust')
 
 build() {
-    cd "$pkgname"
-    cargo build --release
+    # PKGBUILD à la racine du dépôt : compiler sur place.
+    cd "$startdir"
+    export CARGO_TARGET_DIR="$srcdir/target"
+    # Les CFLAGS/LDFLAGS de makepkg cassent la compilation des crates C (ring).
+    unset CFLAGS CXXFLAGS LDFLAGS CPPFLAGS
+    cargo build --release --frozen
 }
 
 package() {
-    cd "$pkgname"
-    install -Dm755 target/release/chat-local -t "$pkgdir/usr/bin"
+    cd "$startdir"
+    install -Dm755 "$srcdir/target/release/chat-local" -t "$pkgdir/usr/bin"
     install -Dm644 README.md -t "$pkgdir/usr/share/doc/$pkgname"
     install -Dm644 LICENSE -t "$pkgdir/usr/share/licenses/$pkgname"
     install -Dm644 chat-local.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/chat-local.svg"

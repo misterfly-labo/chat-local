@@ -1,3 +1,9 @@
+// Sous Windows en release : pas de fenêtre de console en arrière-plan.
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -404,11 +410,13 @@ impl ChatApp {
         });
     }
 
-    /// Chemin du fichier de configuration (XDG ou $HOME/.config).
+    /// Chemin du fichier de configuration (XDG, %APPDATA% ou $HOME/.config).
     fn config_path() -> Option<PathBuf> {
         let dir = std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+            .or_else(|| std::env::var_os("APPDATA").map(PathBuf::from))
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+            .or_else(|| std::env::var_os("USERPROFILE").map(|h| PathBuf::from(h).join(".config")))?;
         Some(dir.join("chat-local").join("config.json"))
     }
 

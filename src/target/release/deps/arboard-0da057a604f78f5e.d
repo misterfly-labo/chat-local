@@ -1,0 +1,11 @@
+/home/enky/Documents/opencode/chat-local/src/target/release/deps/arboard-0da057a604f78f5e.d: /home/enky/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arboard-3.7.0/src/lib.rs /home/enky/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arboard-3.7.0/src/common.rs /home/enky/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arboard-3.7.0/src/platform/mod.rs /home/enky/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arboard-3.7.0/src/platform/linux/mod.rs /home/enky/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arboard-3.7.0/src/platform/linux/x11.rs
+
+/home/enky/Documents/opencode/chat-local/src/target/release/deps/libarboard-0da057a604f78f5e.rlib: /home/enky/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arboard-3.7.0/src/lib.rs /home/enky/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arboard-3.7.0/src/common.rs /home/enky/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arboard-3.7.0/src/platform/mod.rs /home/enky/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arboard-3.7.0/src/platform/linux/mod.rs /home/enky/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arboard-3.7.0/src/platform/linux/x11.rs
+
+/home/enky/Documents/opencode/chat-local/src/target/release/deps/libarboard-0da057a604f78f5e.rmeta: /home/enky/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arboard-3.7.0/src/lib.rs /home/enky/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arboard-3.7.0/src/common.rs /home/enky/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arboard-3.7.0/src/platform/mod.rs /home/enky/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arboard-3.7.0/src/platform/linux/mod.rs /home/enky/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arboard-3.7.0/src/platform/linux/x11.rs
+
+/home/enky/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arboard-3.7.0/src/lib.rs:
+/home/enky/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arboard-3.7.0/src/common.rs:
+/home/enky/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arboard-3.7.0/src/platform/mod.rs:
+/home/enky/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arboard-3.7.0/src/platform/linux/mod.rs:
+/home/enky/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arboard-3.7.0/src/platform/linux/x11.rs:

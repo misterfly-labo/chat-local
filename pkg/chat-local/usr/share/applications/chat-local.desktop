@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Chat Lemonade
+GenericName=Chat local
+Comment=Discuter avec les LLM locaux de Lemonade (voix incluse)
+Exec=chat-local
+TryExec=chat-local
+Icon=chat-local
+Terminal=false
+Categories=Network;Chat;
+Keywords=chat;llm;lemonade;ia;npu;
+StartupNotify=true
