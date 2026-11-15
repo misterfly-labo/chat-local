@@ -133,6 +133,8 @@ enum ApiEvent {
     StatsUpdated(Option<SystemStats>, Option<LoadedModelInfo>),
     Reply(Message),
     Error(String),
+    /// Purge de démarrage du NPU terminée (voir startup_reset).
+    StartupPurged,
 }
 
 struct ChatApp {
@@ -160,6 +162,8 @@ struct ChatApp {
     saved_model: String,
     /// Vrai au premier rendu : donner le focus au champ de saisie.
     want_input_focus: bool,
+    /// Purge de démarrage du NPU en cours, avant le chargement du dernier modèle.
+    startup_purging: bool,
     /// Facteur de zoom de la police, persisté dans la config.
     font_scale: f32,
     scale_applied: bool,
@@ -206,13 +210,37 @@ impl ChatApp {
             last_stats: Instant::now() - STATS_REFRESH,
             saved_model,
             want_input_focus: true,
+            startup_purging: false,
             font_scale,
             scale_applied: false,
         };
-        // Au démarrage : charger la liste des modèles ; le dernier modèle
-        // utilisé sera ensuite sélectionné puis chargé dans le NPU automatiquement.
-        app.load_models();
+        // Au démarrage : purger le NPU, puis charger la liste des modèles ;
+        // le dernier modèle utilisé sera ensuite chargé automatiquement.
+        app.startup_reset();
         app
+    }
+
+    /// Purge tout ce qui réside dans le NPU avant le premier chargement.
+    fn startup_reset(&mut self) {
+        if self.startup_purging {
+            return;
+        }
+        self.startup_purging = true;
+        let tx = self.event_tx.clone();
+        std::thread::spawn(move || {
+            let result = http_client(LOAD_TIMEOUT)
+                .post(UNLOAD_URL)
+                .json(&serde_json::json!({}))
+                .send()
+                .and_then(|r| r.error_for_status());
+            let _ = tx.send(if result.is_ok() {
+                ApiEvent::StartupPurged
+            } else {
+                // Le serveur est peut-être injoignable : continuer quand même
+                // pour afficher l'erreur et laisser une chance de réessayer.
+                ApiEvent::Error("Purge de démarrage du NPU impossible".to_string())
+            });
+        });
     }
 
     /// Chemin du fichier de configuration (XDG ou $HOME/.config).
@@ -466,6 +494,14 @@ impl ChatApp {
                     self.stats_loading = false;
                     self.last_stats = Instant::now();
                 }
+                ApiEvent::StartupPurged => {
+                    // NPU propre : récupérer la liste des modèles, ce qui
+                    // déclenchera le chargement du dernier modèle utilisé.
+                    self.startup_purging = false;
+                    self.loaded_model.clear();
+                    self.loaded_model_info = None;
+                    self.load_models();
+                }
                 ApiEvent::Reply(msg) => {
                     self.messages.push_back(msg);
                     self.is_generating = false;
@@ -474,6 +510,12 @@ impl ChatApp {
                     // Éviter une boucle de réessai auto : considérer le modèle comme traité.
                     if self.loading_model {
                         self.loaded_model = self.selected_model.clone();
+                    }
+                    if self.startup_purging {
+                        // Purge impossible (serveur injoignable) : tenter quand
+                        // même la liste des modèles pour afficher l'état réel.
+                        self.startup_purging = false;
+                        self.load_models();
                     }
                     self.error = Some(e);
                     self.is_generating = false;
@@ -588,7 +630,10 @@ impl eframe::App for ChatApp {
             ui.add_space(5.0);
             ui.horizontal(|ui| {
                 let send = ui.add_enabled(
-                    !self.is_generating && !self.loading_model && !self.models.is_empty(),
+                    !self.is_generating
+                        && !self.loading_model
+                        && !self.startup_purging
+                        && !self.models.is_empty(),
                     egui::Button::new("Envoyer"),
                 );
                 let input = ui.add_sized(
@@ -686,7 +731,13 @@ impl eframe::App for ChatApp {
             ui.horizontal(|ui| {
                 ui.label("Modèle :");
                 if self.models.is_empty() {
-                    if ui.button("Charger les modèles").clicked() {
+                    if self.startup_purging {
+                        ui.add(egui::Spinner::default());
+                        ui.weak("Nettoyage du NPU…");
+                    } else if self.is_generating {
+                        ui.add(egui::Spinner::default());
+                        ui.weak("Récupération des modèles…");
+                    } else if ui.button("Charger les modèles").clicked() {
                         self.load_models();
                     }
                     ui.weak("Aucun modèle chargé");
