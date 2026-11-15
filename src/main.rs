@@ -1,6 +1,7 @@
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 
@@ -89,6 +90,12 @@ struct LoadedModelInfo {
     rss_gb: Option<f64>,
 }
 
+/// État persisté entre les lancements de l'application.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct PersistedState {
+    last_model: String,
+}
+
 /// Événement renvoyé par les threads HTTP vers le thread UI.
 enum ApiEvent {
     ModelsLoaded(Vec<LLMConfig>, Option<f64>),
@@ -119,6 +126,10 @@ struct ChatApp {
     stats_loading: bool,
     purge_in_progress: bool,
     last_stats: Instant,
+    /// Dernier modèle utilisé, restauré depuis le fichier de config.
+    saved_model: String,
+    /// Vrai au premier rendu : donner le focus au champ de saisie.
+    want_input_focus: bool,
 }
 
 /// Lit la mémoire résidente (VmRSS) du process qui pilote le NPU.
@@ -133,7 +144,12 @@ fn read_rss_gb(pid: u32) -> Option<f64> {
 impl ChatApp {
     fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         let (event_tx, event_rx) = channel();
-        ChatApp {
+        let saved_model = Self::config_path()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|s| serde_json::from_str::<PersistedState>(&s).ok())
+            .map(|s| s.last_model)
+            .unwrap_or_default();
+        let mut app = ChatApp {
             models: Vec::new(),
             messages: VecDeque::new(),
             input_text: String::new(),
@@ -151,6 +167,35 @@ impl ChatApp {
             stats_loading: false,
             purge_in_progress: false,
             last_stats: Instant::now() - STATS_REFRESH,
+            saved_model,
+            want_input_focus: true,
+        };
+        // Au démarrage : charger la liste des modèles ; le dernier modèle
+        // utilisé sera ensuite sélectionné puis chargé dans le NPU automatiquement.
+        app.load_models();
+        app
+    }
+
+    /// Chemin du fichier de configuration (XDG ou $HOME/.config).
+    fn config_path() -> Option<PathBuf> {
+        let dir = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+        Some(dir.join("chat-local").join("config.json"))
+    }
+
+    /// Enregistre le dernier modèle utilisé sur disque.
+    fn persist_last_model(&self) {
+        if let Some(path) = Self::config_path() {
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let state = PersistedState {
+                last_model: self.selected_model.clone(),
+            };
+            if let Ok(json) = serde_json::to_string_pretty(&state) {
+                let _ = std::fs::write(path, json);
+            }
         }
     }
 
@@ -340,8 +385,14 @@ impl ChatApp {
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
                 ApiEvent::ModelsLoaded(models, total_ram_gb) => {
-                    if let Some(first) = models.first() {
-                        self.selected_model = first.id.clone();
+                    // Restaurer le dernier modèle utilisé si possible, sinon le premier.
+                    if !models.iter().any(|m| m.id == self.selected_model) {
+                        self.selected_model = models
+                            .iter()
+                            .find(|m| m.id == self.saved_model)
+                            .map(|m| m.id.clone())
+                            .or_else(|| models.first().map(|m| m.id.clone()))
+                            .unwrap_or_default();
                     }
                     self.models = models;
                     self.total_ram_gb = total_ram_gb;
@@ -350,6 +401,8 @@ impl ChatApp {
                 ApiEvent::ModelLoaded(model) => {
                     self.loaded_model = model;
                     self.loading_model = false;
+                    self.saved_model = self.selected_model.clone();
+                    self.persist_last_model();
                 }
                 ApiEvent::StatsUpdated(stats, loaded) => {
                     self.stats = stats;
@@ -398,6 +451,8 @@ impl ChatApp {
         self.input_text.clear();
         self.messages
             .push_back(Message { role: "user".to_string(), content: text });
+        self.saved_model = self.selected_model.clone();
+        self.persist_last_model();
 
         self.is_generating = true;
         self.error = None;
@@ -458,8 +513,16 @@ impl eframe::App for ChatApp {
                 );
                 let input = ui.add_sized(
                     [ui.available_width() - 10.0, 30.0],
-                    egui::TextEdit::singleline(&mut self.input_text).hint_text("Tapez votre message…"),
+                    egui::TextEdit::singleline(&mut self.input_text)
+                        .hint_text("Tapez votre message…")
+                        .id(egui::Id::new("chat_input")),
                 );
+
+                // Au démarrage : le chat est prêt, focus sur le champ de saisie.
+                if self.want_input_focus {
+                    ctx.memory_mut(|mem| mem.request_focus(egui::Id::new("chat_input")));
+                    self.want_input_focus = false;
+                }
 
                 // Envoyer au clic ou avec Entrée quand le champ a le focus.
                 let enter = input.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
