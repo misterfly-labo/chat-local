@@ -150,6 +150,40 @@ struct PersistedState {
     voice_output: Option<bool>,
 }
 
+/// Répare l'en-tête WAV si le process d'enregistrement a été tué avant
+/// d'avoir pu écrire les tailles réelles (SIGKILL laisse RIFF=8, data=0).
+/// Sans réparation, le serveur Whisper rejette le fichier en « Invalid request ».
+fn repair_wav(path: &std::path::Path) {
+    let Ok(mut data) = std::fs::read(path) else { return };
+    if data.len() < 44 || &data[0..4] != b"RIFF" {
+        return;
+    }
+    // Localiser le chunk "data" en suivant la chaîne des chunks.
+    let mut pos = 12usize;
+    let mut data_size_field: Option<usize> = None;
+    while pos + 8 <= data.len() {
+        let chunk_id = &data[pos..pos + 4];
+        let chunk_size = u32::from_le_bytes(
+            data[pos + 4..pos + 8].try_into().unwrap_or([0; 4]),
+        ) as usize;
+        if chunk_id == b"data" {
+            data_size_field = Some(pos + 4);
+            break;
+        }
+        pos += 8 + chunk_size + (chunk_size % 2);
+    }
+    let Some(size_field) = data_size_field else { return };
+    let actual = (data.len() - size_field - 4) as u32;
+    let declared = u32::from_le_bytes(data[size_field..size_field + 4].try_into().unwrap_or([0; 4]));
+    if declared == actual {
+        return; // En-tête déjà correct, rien à faire.
+    }
+    let total = data.len() as u32;
+    data[4..8].copy_from_slice(&(total - 8).to_le_bytes());
+    data[size_field..size_field + 4].copy_from_slice(&actual.to_le_bytes());
+    let _ = std::fs::write(path, data);
+}
+
 /// Copie dans le presse-papiers ET lance un process détaché qui conserve
 /// le contenu après la fermeture de l'application (requis sous Wayland,
 /// où le presse-papiers meurt avec l'application qui le possède).
@@ -518,6 +552,8 @@ impl ChatApp {
             let _ = child.wait();
             // Interrompre la voix du modèle pour ne pas la réenregistrer.
             let _ = self.tts_stop_tx.send(());
+            // Le SIGKILL laisse un en-tête WAV incomplet : le réparer.
+            repair_wav(&std::env::temp_dir().join("chat-local-rec.wav"));
             self.transcribe_recording();
             return;
         }
