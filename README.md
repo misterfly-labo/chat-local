@@ -1,19 +1,28 @@
 # chat-local
 
-Interface graphique en Rust (eframe/egui) pour discuter avec les LLM locaux servis par [Lemonade](https://github.com/lemonade-sdk/lemonade) via son API compatible OpenAI (`http://localhost:13305/v1`).
+Interface graphique en Rust (eframe/egui) pour discuter — au clavier **et à la voix** — avec les LLM locaux servis par [Lemonade](https://github.com/lemonade-sdk/lemonade) via son API compatible OpenAI (`http://localhost:13305/v1`). Conçu pour les PC à NPU (AMD Ryzen AI), 100 % local, aucune donnée ne quitte la machine.
+
+![Rust](https://img.shields.io/badge/Rust-1.7-orange) ![License](https://img.shields.io/badge/License-MIT-blue)
 
 ## Fonctionnalités
 
-- Chargement des modèles disponibles sur le serveur Lemonade
-- Sélection du modèle via un menu déroulant
-- Conversation avec historique complet envoyé au modèle à chaque message
-- Requêtes HTTP en arrière-plan : l'interface reste réactive
-- Affichage des erreurs (serveur injoignable, réponse invalide) directement dans l'UI
-- Envoi du message au clic ou avec la touche `Entrée`
+- **Chat complet** : historique conservé et renvoyé au modèle à chaque message, bulles de messages avec retour à la ligne automatique
+- **Sélection et chargement du modèle** : menu déroulant listant les modèles du serveur, chargement automatique dans le NPU à la sélection, restauration du dernier modèle utilisé au démarrage
+- **Chat vocal bidirectionnel** :
+  - 🎤 **Toi → modèle** : enregistrement micro via PipeWire (`pw-record`), transcription par Whisper (`/v1/audio/transcriptions`)
+  - 🔊 **Modèle → toi** : synthèse vocale française par Kokoro (`/v1/audio/speech`)
+  - **Mains libres** : détection de silence adaptative — après ton temps de silence réglable (1 à 10 s, défaut 4 s), l'enregistrement s'arrête et la question part automatiquement au modèle
+- **Réglages persistés** (dans `~/.config/chat-local/config.json`) : dernier modèle, voix ON/OFF, délai d'auto-envoi, taille de police
+- **Stats en direct** : RAM, charge NPU, CPU, mémoire du processus ; temps de génération et débit (tokens/s) par réponse
+- **Confort** : zoom de police (A−/A+), copie d'un message ou de tout l'historique (presse-papiers persistant), effacement de la conversation
+- **Interface 100 % réactive** : toutes les requêtes HTTP tournent en arrière-plan (threads + files d'événements)
 
 ## Prérequis
 
-Un serveur Lemonade lancé en local sur le port 13305 (par défaut).
+- Un serveur [Lemonade](https://github.com/lemonade-sdk/lemonade) lancé en local sur le port 13305
+- Rust stable (`rustup` ou paquet `rust`)
+- Pour le chat vocal : `pipewire` (`pw-record`, `pw-play`) et un modèle Whisper + Kokoro téléchargés par Lemonade au premier usage
+- Pour la copie : `wl-clipboard` (Wayland)
 
 ## Compilation
 
@@ -29,9 +38,9 @@ cargo build --release
 
 ## Utilisation
 
-1. Cliquez sur **Charger les modèles**
-2. Choisissez un modèle dans le menu déroulant
-3. Tapez un message et cliquez sur **Envoyer** (ou appuyez sur `Entrée`)
+1. Choisis un modèle dans le menu déroulant — il se charge automatiquement dans le NPU
+2. Tape un message et appuie sur `Entrée`, **ou** clique 🎤 Parler et dicte : ta question part toute seule après le silence réglé
+3. La réponse s'affiche (et se lit à voix haute si 🔊 Voix : ON)
 
 ## Installation (Arch Linux)
 
@@ -43,4 +52,9 @@ cargo build --release
 de fichiers : il s'ouvre dans une fenêtre de terminal et procède à
 l'installation complète (binaire, icône, lanceur pour le dock). Le lanceur
 `chat-local.desktop` apparaît alors dans le menu des applications, prêt à
-être épinglé dans le dock.
+être épinglé dans le dock. Options : `--system` (installation système) et
+`--uninstall`.
+
+## Licence
+
+[MIT](LICENSE)
