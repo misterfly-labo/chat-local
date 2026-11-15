@@ -210,6 +210,8 @@ enum ApiEvent {
     Transcribed(String),
     /// Le synthétiseur commence (true) ou finit (false) de parler.
     Speaking(bool),
+    /// 4 s de silence après une prise de parole : arrêter et envoyer.
+    AutoStopRecording,
 }
 
 struct ChatApp {
@@ -569,9 +571,110 @@ impl ChatApp {
             .stderr(std::process::Stdio::null())
             .spawn()
         {
-            Ok(child) => self.recorder = Some(child),
+            Ok(child) => {
+                self.recorder = Some(child);
+                self.spawn_recording_watcher();
+            }
             Err(e) => self.error = Some(format!("Enregistrement impossible : {e}")),
         }
+    }
+
+    /// Surveille l'enregistrement : après 4 s de silence suivant une prise
+    /// de parole, demande l'arrêt et l'envoi automatique au modèle.
+    fn spawn_recording_watcher(&mut self) {
+        let tx = self.event_tx.clone();
+        std::thread::spawn(move || {
+            const INTERVAL_MS: u64 = 400;
+            const SILENCE_LIMIT_MS: u32 = 4000;
+            const MAX_RECORD_MS: u32 = 90_000;
+            const SAMPLES_PER_SEC: usize = 16_000;
+
+            let path = std::env::temp_dir().join("chat-local-rec.wav");
+            const CALIBRATION_MS: u32 = 1200;
+
+            let mut floor = f64::INFINITY; // niveau ambiant estimé
+            let mut spoke = false;
+            let mut hot_windows: u32 = 0;
+            let mut silence_ms: u32 = 0;
+            let mut elapsed_ms: u32 = 0;
+            let mut last_len: usize = 0;
+            let mut stable_ms: u32 = 0;
+
+            loop {
+                std::thread::sleep(Duration::from_millis(INTERVAL_MS));
+                elapsed_ms += INTERVAL_MS as u32;
+
+                let Ok(data) = std::fs::read(&path) else { break };
+                let len = data.len();
+                if len == last_len {
+                    // Le fichier ne grandit plus : l'enregistrement s'est
+                    // arrêté autrement (bouton, fermeture de l'app).
+                    stable_ms += INTERVAL_MS as u32;
+                    if stable_ms >= 2000 {
+                        break;
+                    }
+                } else {
+                    stable_ms = 0;
+                }
+                last_len = len;
+                if len < 44 + SAMPLES_PER_SEC / 10 * 2 {
+                    continue; // pas encore une dixième de seconde de données
+                }
+
+                // RMS des 0,5 dernières secondes (échantillons i16 little-endian).
+                let tail = &data[data.len().saturating_sub(SAMPLES_PER_SEC * 2 / 2)..];
+                let n = tail.len() / 2;
+                if n == 0 {
+                    continue;
+                }
+                let sum_sq: i64 = tail
+                    .chunks_exact(2)
+                    .map(|c| {
+                        let v = i16::from_le_bytes([c[0], c[1]]) as i64;
+                        v * v
+                    })
+                    .sum();
+                let rms = (sum_sq as f64 / n as f64).sqrt();
+
+                // Calibration : estimer le bruit ambiant avant tout jugement.
+                if elapsed_ms <= CALIBRATION_MS {
+                    if rms < floor {
+                        floor = rms;
+                    }
+                    continue;
+                }
+
+                // Seuil adaptatif : 2,5× le bruit ambiant observé.
+                let threshold = (floor * 2.5).max(1200.0);
+                if !spoke {
+                    // Le plancher se fige dès la première parole détectée.
+                    if rms < floor {
+                        floor = rms;
+                    }
+                    if rms > threshold {
+                        spoke = true;
+                        silence_ms = 0;
+                    } else {
+                        // Filet de sécurité : parole très haute immédiate
+                        // (le plancher aurait pu se caler sur la voix).
+                        hot_windows = if rms > 4500.0 { hot_windows + 1 } else { 0 };
+                        if hot_windows >= 2 {
+                            spoke = true;
+                            silence_ms = 0;
+                        }
+                    }
+                } else if rms > threshold {
+                    silence_ms = 0;
+                } else {
+                    silence_ms += INTERVAL_MS as u32;
+                }
+
+                if (spoke && silence_ms >= SILENCE_LIMIT_MS) || elapsed_ms >= MAX_RECORD_MS {
+                    let _ = tx.send(ApiEvent::AutoStopRecording);
+                    break;
+                }
+            }
+        });
     }
 
     /// Transcrit le fichier enregistré puis envoie le texte au modèle.
@@ -747,6 +850,12 @@ impl ChatApp {
                 ApiEvent::Speaking(speaking) => {
                     self.speaking = speaking;
                 }
+                ApiEvent::AutoStopRecording => {
+                    // Fin de parole détectée : arrêter et envoyer.
+                    if self.recorder.is_some() {
+                        self.toggle_recording();
+                    }
+                }
                 ApiEvent::Error(e) => {
                     // Éviter une boucle de réessai auto : considérer le modèle comme traité.
                     if self.loading_model {
@@ -893,7 +1002,7 @@ impl eframe::App for ChatApp {
                     }
                 }
                 if self.recorder.is_some() {
-                    ui.weak("🎙 à toi de parler…");
+                    ui.weak("🎙 … (envoi auto après 4 s de silence)");
                 }
 
                 let send = ui.add_enabled(
