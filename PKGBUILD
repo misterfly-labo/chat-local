@@ -6,7 +6,7 @@ pkgdesc="Interface graphique pour chatter avec les LLM de Lemonade"
 arch=('x86_64')
 url="https://github.com/enky/chat-local"
 license=('MIT')
-depends=('openssl' 'fontconfig' 'gcc-libs' 'glibc' 'libx11' 'wayland')
+depends=('openssl' 'fontconfig' 'gcc-libs' 'glibc' 'libx11' 'wayland' 'wl-clipboard')
 makedepends=('cargo' 'rust')
 
 build() {

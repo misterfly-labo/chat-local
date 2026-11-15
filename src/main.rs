@@ -124,6 +124,23 @@ struct PersistedState {
     last_model: String,
     /// Facteur de zoom de la police (1.0 = taille normale).
     font_scale: Option<f32>,
+    /// Purger le NPU au démarrage (comportement par défaut).
+    skip_startup_purge: Option<bool>,
+}
+
+/// Copie dans le presse-papiers ET lance un process détaché qui conserve
+/// le contenu après la fermeture de l'application (requis sous Wayland,
+/// où le presse-papiers meurt avec l'application qui le possède).
+fn copy_persistent(ctx: &egui::Context, text: String) {
+    // Copie immédiate, valable pendant que l'app tourne.
+    ctx.copy_text(text.clone());
+    // Process qui survit à l'app et sert le presse-papiers ensuite.
+    let _ = std::process::Command::new("wl-copy")
+        .arg(text)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
 
 /// Événement renvoyé par les threads HTTP vers le thread UI.
@@ -164,6 +181,8 @@ struct ChatApp {
     want_input_focus: bool,
     /// Purge de démarrage du NPU en cours, avant le chargement du dernier modèle.
     startup_purging: bool,
+    /// Case « Ne pas purger au démarrage », persistée.
+    skip_startup_purge: bool,
     /// Facteur de zoom de la police, persisté dans la config.
     font_scale: f32,
     scale_applied: bool,
@@ -190,7 +209,12 @@ impl ChatApp {
             .and_then(|p| std::fs::read_to_string(p).ok())
             .and_then(|s| serde_json::from_str::<PersistedState>(&s).ok())
             .and_then(|s| s.font_scale)
-            .unwrap_or(1.0);        let mut app = ChatApp {
+            .unwrap_or(1.0);
+        let skip_startup_purge = Self::config_path()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|s| serde_json::from_str::<PersistedState>(&s).ok())
+            .and_then(|s| s.skip_startup_purge)
+            .unwrap_or(false);        let mut app = ChatApp {
             models: Vec::new(),
             messages: VecDeque::new(),
             input_text: String::new(),
@@ -211,12 +235,18 @@ impl ChatApp {
             saved_model,
             want_input_focus: true,
             startup_purging: false,
+            skip_startup_purge,
             font_scale,
             scale_applied: false,
         };
-        // Au démarrage : purger le NPU, puis charger la liste des modèles ;
-        // le dernier modèle utilisé sera ensuite chargé automatiquement.
-        app.startup_reset();
+        // Au démarrage : purger le NPU (sauf si l'utilisateur a décoché),
+        // puis charger la liste des modèles ; le dernier modèle utilisé
+        // sera ensuite chargé automatiquement.
+        if app.skip_startup_purge {
+            app.load_models();
+        } else {
+            app.startup_reset();
+        }
         app
     }
 
@@ -260,6 +290,7 @@ impl ChatApp {
             let state = PersistedState {
                 last_model: self.selected_model.clone(),
                 font_scale: Some(self.font_scale),
+                skip_startup_purge: Some(self.skip_startup_purge),
             };
             if let Ok(json) = serde_json::to_string_pretty(&state) {
                 let _ = std::fs::write(path, json);
@@ -767,7 +798,7 @@ impl eframe::App for ChatApp {
                 // Gestion de l'historique.
                 if !self.messages.is_empty() {
                     if ui.button("📋 Copier tout").clicked() {
-                        ctx.copy_text(Self::conversation_as_text(&self.messages));
+                        copy_persistent(ctx, Self::conversation_as_text(&self.messages));
                     }
                     if ui.button("🗑 Effacer").clicked() {
                         self.messages.clear();
@@ -776,6 +807,13 @@ impl eframe::App for ChatApp {
 
                 // Taille des caractères, à droite de la barre.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .checkbox(&mut self.skip_startup_purge, "Ne pas purger au démarrage")
+                        .changed()
+                    {
+                        self.persist_state();
+                    }
+                    ui.separator();
                     if ui.button("A−").clicked() {
                         self.font_scale = (self.font_scale - 0.1).max(0.5);
                         ctx.set_zoom_factor(self.font_scale);
@@ -834,7 +872,7 @@ impl eframe::App for ChatApp {
 
                         // Copier ce message en particulier.
                         if ui.small_button("📋").clicked() {
-                            ctx.copy_text(msg.content.clone());
+                            copy_persistent(ctx, msg.content.clone());
                         }
                     });
                     // Temps total et débit moyen de la génération.
