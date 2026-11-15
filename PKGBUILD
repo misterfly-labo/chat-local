@@ -19,4 +19,6 @@ package() {
     install -Dm755 target/release/chat-local -t "$pkgdir/usr/bin"
     install -Dm644 README.md -t "$pkgdir/usr/share/doc/$pkgname"
     install -Dm644 LICENSE -t "$pkgdir/usr/share/licenses/$pkgname"
+    install -Dm644 chat-local.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/chat-local.svg"
+    install -Dm644 chat-local.desktop "$pkgdir/usr/share/applications/chat-local.desktop"
 }
