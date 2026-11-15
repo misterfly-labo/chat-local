@@ -36,5 +36,11 @@ cargo build --release
 ## Installation (Arch Linux)
 
 ```sh
-makepkg -si
+./installer.sh
 ```
+
+`installer.sh` est aussi conçu pour un **double-clic** dans le gestionnaire
+de fichiers : il s'ouvre dans une fenêtre de terminal et procède à
+l'installation complète (binaire, icône, lanceur pour le dock). Le lanceur
+`chat-local.desktop` apparaît alors dans le menu des applications, prêt à
+être épinglé dans le dock.
