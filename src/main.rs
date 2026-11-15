@@ -14,6 +14,19 @@ const STATS_URL: &str = "http://localhost:13305/v1/system-stats";
 const SYSTEM_INFO_URL: &str = "http://localhost:13305/v1/system-info";
 const STATS_REFRESH: Duration = Duration::from_secs(2);
 
+// Timeouts adaptés à chaque type de requête : la génération LLM et le
+// chargement d'un modèle dans le NPU peuvent prendre plusieurs minutes.
+const FAST_TIMEOUT: Duration = Duration::from_secs(10);
+const CHAT_TIMEOUT: Duration = Duration::from_secs(600);
+const LOAD_TIMEOUT: Duration = Duration::from_secs(900);
+
+fn http_client(timeout: Duration) -> reqwest::blocking::Client {
+    reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .build()
+        .expect("création du client HTTP")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Message {
     role: String,
@@ -210,7 +223,7 @@ impl ChatApp {
         let tx = self.event_tx.clone();
         std::thread::spawn(move || {
             let result = (|| -> Result<(Vec<LLMConfig>, Option<f64>), anyhow::Error> {
-                let client = reqwest::blocking::Client::new();
+                let client = http_client(FAST_TIMEOUT);
                 let response = client.get(MODELS_URL).send()?;
                 let response = response.error_for_status()?;
                 let models_data: ModelsResponse = response.json()?;
@@ -260,7 +273,7 @@ impl ChatApp {
         self.stats_loading = true;
         let tx = self.event_tx.clone();
         std::thread::spawn(move || {
-            let client = reqwest::blocking::Client::new();
+            let client = http_client(FAST_TIMEOUT);
             let stats = client
                 .get(STATS_URL)
                 .send()
@@ -310,7 +323,7 @@ impl ChatApp {
         self.error = None;
         let tx = self.event_tx.clone();
         std::thread::spawn(move || {
-            let client = reqwest::blocking::Client::new();
+            let client = http_client(LOAD_TIMEOUT);
             let result = client
                 .post(UNLOAD_URL)
                 .json(&serde_json::json!({ "model_name": target }))
@@ -367,7 +380,7 @@ impl ChatApp {
         let tx = self.event_tx.clone();
         std::thread::spawn(move || {
             let result = (|| -> Result<(), anyhow::Error> {
-                let response = reqwest::blocking::Client::new()
+                let response = http_client(LOAD_TIMEOUT)
                     .post(LOAD_URL)
                     .json(&serde_json::json!({ "model_name": model }))
                     .send()?;
@@ -473,7 +486,7 @@ impl ChatApp {
         let tx = self.event_tx.clone();
         std::thread::spawn(move || {
             let result = (|| -> Result<Message, anyhow::Error> {
-                let response = reqwest::blocking::Client::new()
+                let response = http_client(CHAT_TIMEOUT)
                     .post(&config.endpoint)
                     .json(&serde_json::json!({
                         "model": config.model,
